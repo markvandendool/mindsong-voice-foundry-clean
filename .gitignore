@@ -27,3 +27,5 @@ Thumbs.db
 models/
 *.pt
 *.ckpt
+.venv-chatterbox/
+.venv-voice-m2/
