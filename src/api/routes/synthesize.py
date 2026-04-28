@@ -10,9 +10,6 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field, validator
 
-from src.engine.f5tts_engine import F5TTSEngine
-from src.engine.chatterbox_engine import ChatterboxEngine
-from src.engine.voxcpm2_engine import VoxCPM2Engine
 from src.post.mix_chain import master_take
 from src.presets.preset_defaults import PRESETS
 
@@ -50,10 +47,13 @@ def _read_job_manifest(job_id: str) -> dict | None:
 def _get_engine(provider: str):
     if provider not in _engines:
         if provider == "f5tts":
+            from src.engine.f5tts_engine import F5TTSEngine
             _engines[provider] = F5TTSEngine()
         elif provider == "chatterbox":
+            from src.engine.chatterbox_engine import ChatterboxEngine
             _engines[provider] = ChatterboxEngine()
         elif provider == "voxcpm2":
+            from src.engine.voxcpm2_engine import VoxCPM2Engine
             _engines[provider] = VoxCPM2Engine()
     return _engines.get(provider)
 
