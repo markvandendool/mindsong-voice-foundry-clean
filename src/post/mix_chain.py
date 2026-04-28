@@ -12,11 +12,12 @@ LOUDNESS_PRESETS = {
 }
 
 
-def _run_ffmpeg(args: list[str]) -> None:
+def _run_ffmpeg(args: list[str], timeout: float = 120.0) -> None:
     result = subprocess.run(
         ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"] + args,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed: {result.stderr}")
@@ -35,6 +36,7 @@ def measure_loudness(audio_path: str) -> dict:
         ],
         capture_output=True,
         text=True,
+        timeout=60.0,
     )
     # Parse JSON from stderr
     lines = result.stderr.splitlines()
@@ -73,6 +75,7 @@ def get_duration(audio_path: str) -> float:
         ],
         capture_output=True,
         text=True,
+        timeout=30.0,
     )
     if result.returncode != 0:
         return 0.0

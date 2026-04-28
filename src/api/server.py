@@ -67,6 +67,10 @@ app.add_middleware(
 @app.middleware("http")
 async def token_auth_middleware(request: Request, call_next):
     """Require token on all routes except root docs and health."""
+    # Allow CORS preflight through without token (CORS middleware handles it)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     if request.url.path in ("/", "/docs", "/openapi.json", "/voice/health"):
         return await call_next(request)
 

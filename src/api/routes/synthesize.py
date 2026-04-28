@@ -296,7 +296,7 @@ async def cancel_job(job_id: str):
     if job["status"] in ("completed", "failed"):
         return {"jobId": job_id, "status": job["status"], "cancelled": False, "reason": "already_terminal"}
 
-    # Try to terminate running subprocess (F5/Chatterbox only)
+    # Try to terminate running work (subprocess for F5/Chatterbox, event for VoxCPM2)
     proc_ref = RUNNING_PROCS.get(job_id)
     if proc_ref:
         proc = proc_ref.get("proc")
@@ -307,6 +307,10 @@ async def cancel_job(job_id: str):
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+        # VoxCPM2 cooperative cancellation
+        cancel_fn = proc_ref.get("cancel")
+        if cancel_fn:
+            cancel_fn()
 
     _transition_status(job_id, "cancelled")
     return {"jobId": job_id, "status": "cancelled", "cancelled": True}

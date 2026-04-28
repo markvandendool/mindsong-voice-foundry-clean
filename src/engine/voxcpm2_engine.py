@@ -1,13 +1,20 @@
 """VoxCPM2 engine wrapper (direct import, same venv as Foundry)."""
 
 import asyncio
+import threading
 from pathlib import Path
 
 from voxcpm import VoxCPM
 
 
 class VoxCPM2Engine:
-    """Wraps VoxCPM2 for voice cloning and voice design."""
+    """Wraps VoxCPM2 for voice cloning and voice design.
+
+    Cancellation is cooperative: the model.generate() call itself cannot be
+    interrupted, but we check a cancellation event before writing output and
+    after generation completes. For true hard-kill, VoxCPM2 must run in a
+    separate process (planned for GA).
+    """
 
     def __init__(self, model_id: str = "openbmb/VoxCPM2"):
         self.model_id = model_id
@@ -29,7 +36,12 @@ class VoxCPM2Engine:
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Run blocking model inference in thread pool
+        # Cooperative cancellation event shared with caller
+        cancel_event = threading.Event()
+        if proc_ref is not None:
+            proc_ref["cancel_event"] = cancel_event
+            proc_ref["cancel"] = cancel_event.set
+
         def _generate():
             model = self._load()
             kwargs = {"text": text, "cfg_value": 2.0, "inference_timesteps": 10}
@@ -40,8 +52,27 @@ class VoxCPM2Engine:
                 kwargs["text"] = f"({voice_design}){text}"
 
             wav = model.generate(**kwargs)
+
+            # Check cancellation after generation (cooperative)
+            if cancel_event.is_set():
+                # Don't write output if cancelled
+                return None
+
             import soundfile as sf
             sf.write(str(out_path), wav, model.tts_model.sample_rate)
             return str(out_path)
 
-        return await asyncio.to_thread(_generate)
+        # Run in thread with its own timeout so asyncio.wait_for on the caller
+        # side can also enforce a ceiling.
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(None, _generate)
+        try:
+            result = await asyncio.wait_for(future, timeout=300.0)
+        except asyncio.TimeoutError:
+            cancel_event.set()
+            raise RuntimeError("VoxCPM2 synthesis exceeded 300s timeout")
+
+        if result is None:
+            raise RuntimeError("VoxCPM2 synthesis cancelled")
+
+        return result

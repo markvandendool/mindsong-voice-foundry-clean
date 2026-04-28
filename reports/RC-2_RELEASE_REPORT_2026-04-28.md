@@ -3,7 +3,7 @@
 **Date:** 2026-04-28  
 **Build:** `mindsong-voice-foundry` (Python 3.12 + FastAPI)  
 **Runtime:** uvicorn on `127.0.0.1:8788`  
-**Token:** `bd7307e718815496e83b2e0e6ad56987ee2be23c05435e603efd1c823eb1f4e6`  
+**Token:** `REDACTED`  
 **GPU:** Apple Silicon MPS (1-inference-at-a-time semaphore)
 
 ---
