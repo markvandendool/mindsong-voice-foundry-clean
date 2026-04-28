@@ -19,6 +19,7 @@ class F5TTSEngine:
         output_path: str,
         speed: float = 1.0,
         remove_silence: bool = True,
+        proc_ref: dict | None = None,
     ) -> str:
         ref_path = Path(ref_audio)
         if not ref_path.is_absolute():
@@ -46,14 +47,28 @@ class F5TTSEngine:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+
+        if proc_ref is not None:
+            proc_ref["proc"] = proc
+
+        try:
+            stdout, stderr = await proc.communicate()
+        finally:
+            if proc_ref is not None:
+                proc_ref.pop("proc", None)
 
         if proc.returncode != 0:
             err = stderr.decode()
             # Auto-fallback to CPU on MPS-specific failure
-            if self.device == "mps" and not self._fallback_to_cpu and ("mps" in err.lower() or "metal" in err.lower()):
+            if (
+                self.device == "mps"
+                and not self._fallback_to_cpu
+                and ("mps" in err.lower() or "metal" in err.lower())
+            ):
                 self._fallback_to_cpu = True
-                return await self.synthesize(text, ref_audio, output_path, speed, remove_silence)
+                return await self.synthesize(
+                    text, ref_audio, output_path, speed, remove_silence, proc_ref
+                )
             raise RuntimeError(f"F5-TTS failed: {err}")
 
         # Fallback: if the CLI didn't honor --output_file, rename the default

@@ -20,6 +20,7 @@ class ChatterboxEngine:
         ref_audio: str,
         output_path: str,
         preset: str = "neutral",
+        proc_ref: dict | None = None,
     ) -> str:
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +40,15 @@ class ChatterboxEngine:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+
+        if proc_ref is not None:
+            proc_ref["proc"] = proc
+
+        try:
+            stdout, stderr = await proc.communicate()
+        finally:
+            if proc_ref is not None:
+                proc_ref.pop("proc", None)
 
         if proc.returncode != 0:
             raise RuntimeError(f"Chatterbox failed: {stderr.decode()}")

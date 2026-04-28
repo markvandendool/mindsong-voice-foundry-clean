@@ -8,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
-from .synthesize import _run_synthesis_job, _read_job_manifest, _write_job_manifest, JOB_ID_RE, GPU_SEMAPHORE
+from .synthesize import _run_synthesis_job, _read_job_manifest, _write_job_manifest, JOB_ID_RE
 
 router = APIRouter()
 
@@ -57,14 +57,14 @@ async def bakeoff(req: BakeoffRequest, background_tasks: BackgroundTasks):
             "updatedAt": now,
         }
         _write_job_manifest(job_id, manifest)
-        async with GPU_SEMAPHORE:
-            background_tasks.add_task(
-                _run_synthesis_job,
-                job_id,
-                req.text,
-                preset,
-                req.mixPreset,
-            )
+        # GPU semaphore is acquired INSIDE each background task worker.
+        background_tasks.add_task(
+            _run_synthesis_job,
+            job_id,
+            req.text,
+            preset,
+            req.mixPreset,
+        )
         jobs_meta.append({"jobId": job_id, "engine": engine, "preset": preset, "status": "queued"})
 
     bake = {

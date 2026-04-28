@@ -24,6 +24,7 @@ class VoxCPM2Engine:
         ref_audio: str | None = None,
         output_path: str = "output.wav",
         voice_design: str | None = None,
+        proc_ref: dict | None = None,
     ) -> str:
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -61,6 +61,28 @@ def test_cancel_returns_not_found_for_missing_job():
     assert res.status_code == 404
 
 
+def test_cancel_returns_already_terminal_for_completed():
+    # Create and complete a job manually via manifest
+    import json
+    from pathlib import Path
+    job_id = "pytest_terminal_001"
+    manifest = {
+        "jobId": job_id,
+        "status": "completed",
+        "createdAt": "2024-01-01T00:00:00",
+        "updatedAt": "2024-01-01T00:00:00",
+    }
+    job_dir = Path("artifacts/jobs") / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "manifest.json").write_text(json.dumps(manifest))
+
+    res = client.delete(f"/voice/synthesize/cancel/{job_id}")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["cancelled"] is False
+    assert data["reason"] == "already_terminal"
+
+
 def test_bakeoff_queues_jobs():
     res = client.post(
         "/voice/bakeoff",

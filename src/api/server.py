@@ -1,21 +1,26 @@
 """FastAPI application for Mindsong Voice Foundry."""
 
 import os
+import sys
 from pathlib import Path
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
-from .routes import synthesize, master, presets, qc, health, bakeoff
-
-APP_DIR = Path(__file__).resolve().parent.parent.parent
-ARTIFACTS_DIR = APP_DIR / "artifacts"
-ARTIFACTS_DIR.mkdir(exist_ok=True)
-
-# Local auth token — set VOICE_FOUNDRY_TOKEN env var to enforce
+# ── Auth: mandatory by default ──────────────────────────────────────────────
 VOICE_FOUNDRY_TOKEN = os.environ.get("VOICE_FOUNDRY_TOKEN")
+ALLOW_NO_TOKEN = os.environ.get("VOICE_FOUNDRY_DEV_ALLOW_NO_TOKEN") == "1"
+
+if not VOICE_FOUNDRY_TOKEN and not ALLOW_NO_TOKEN:
+    print(
+        "\n[FATAL] VOICE_FOUNDRY_TOKEN is required.\n"
+        "Set VOICE_FOUNDRY_DEV_ALLOW_NO_TOKEN=1 only for local throwaway dev.\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 # Default dev origins; override with VOICE_FOUNDRY_ORIGINS=comma,separated,list
 DEFAULT_ORIGINS = [
     "http://localhost:3000",
@@ -27,6 +32,12 @@ DEFAULT_ORIGINS = [
 ]
 _origins_env = os.environ.get("VOICE_FOUNDRY_ORIGINS")
 ALLOWED_ORIGINS = _origins_env.split(",") if _origins_env else DEFAULT_ORIGINS
+
+APP_DIR = Path(__file__).resolve().parent.parent.parent
+ARTIFACTS_DIR = APP_DIR / "artifacts"
+ARTIFACTS_DIR.mkdir(exist_ok=True)
+
+from .routes import synthesize, master, presets, qc, health, bakeoff  # noqa: E402
 
 app = FastAPI(
     title="Mindsong Voice Foundry",
@@ -45,13 +56,19 @@ app.add_middleware(
 
 @app.middleware("http")
 async def token_auth_middleware(request: Request, call_next):
-    if VOICE_FOUNDRY_TOKEN and request.url.path not in ("/", "/docs", "/openapi.json"):
+    """Require token on all routes except root docs and health."""
+    if request.url.path in ("/", "/docs", "/openapi.json", "/voice/health"):
+        return await call_next(request)
+
+    # When token is configured, enforce it
+    if VOICE_FOUNDRY_TOKEN:
         token = request.headers.get("X-Voice-Foundry-Token")
         if token != VOICE_FOUNDRY_TOKEN:
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Unauthorized — set X-Voice-Foundry-Token header"},
             )
+
     return await call_next(request)
 
 
