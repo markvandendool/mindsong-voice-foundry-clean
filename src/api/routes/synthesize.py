@@ -1,12 +1,14 @@
-"""Voice synthesis endpoint with async job queue — multi-engine."""
+"""Voice synthesis endpoint with async job queue — multi-engine, hardened."""
 
 import asyncio
+import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel, Field, validator
 
 from src.engine.f5tts_engine import F5TTSEngine
 from src.engine.chatterbox_engine import ChatterboxEngine
@@ -19,8 +21,30 @@ router = APIRouter()
 # Lazy-init engines
 _engines: dict[str, object] = {}
 
-# In-memory job store (replace with Redis for multi-worker)
-_jobs: dict[str, dict] = {}
+# One job at a time on GPU to prevent OOM / contention
+GPU_SEMAPHORE = asyncio.Semaphore(1)
+
+JOB_ID_RE = re.compile(r"^[a-zA-Z0-9._-]{1,80}$")
+MAX_TEXT_CHARS = 600
+JOB_TIMEOUT_SECONDS = 420
+ARTIFACTS_DIR = Path("artifacts")
+
+
+def _job_dir(job_id: str) -> Path:
+    return ARTIFACTS_DIR / "jobs" / job_id
+
+
+def _write_job_manifest(job_id: str, data: dict) -> None:
+    job_dir = _job_dir(job_id)
+    job_dir.mkdir(parents=True, exist_ok=True)
+    (job_dir / "manifest.json").write_text(json.dumps(data, indent=2, default=str))
+
+
+def _read_job_manifest(job_id: str) -> dict | None:
+    path = _job_dir(job_id) / "manifest.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return None
 
 
 def _get_engine(provider: str):
@@ -35,13 +59,21 @@ def _get_engine(provider: str):
 
 
 class SynthesizeRequest(BaseModel):
-    text: str
+    text: str = Field(..., max_length=MAX_TEXT_CHARS)
     preset: str = "mark_rocky_tutor_warm"
     persona: str = "rocky"
     quality: str = "production"
     mixPreset: str | None = None
     discloseAI: bool = True
     jobId: str | None = None
+
+    @validator("jobId")
+    def validate_job_id(cls, v):
+        if v is None:
+            return v
+        if not JOB_ID_RE.match(v):
+            raise ValueError("jobId must be 1-80 chars of a-z, A-Z, 0-9, ., _, -")
+        return v
 
 
 class JobStatusResponse(BaseModel):
@@ -59,10 +91,18 @@ class JobStatusResponse(BaseModel):
 
 def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset: str):
     """Blocking worker for background synthesis + mastering."""
-    try:
-        _jobs[job_id]["status"] = "running"
-        _jobs[job_id]["updatedAt"] = datetime.utcnow().isoformat()
+    now = datetime.utcnow().isoformat()
+    manifest = {
+        "jobId": job_id,
+        "status": "running",
+        "text": text,
+        "preset": preset_key,
+        "mixPreset": mix_preset,
+        "updatedAt": now,
+    }
+    _write_job_manifest(job_id, manifest)
 
+    try:
         preset = PRESETS.get(preset_key, PRESETS["mark_rocky_tutor_warm"])
         provider = preset["provider"]
 
@@ -106,7 +146,7 @@ def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset: str)
 
         metrics = master_take(str(raw_path), str(mastered_path), mix_preset)
 
-        _jobs[job_id].update({
+        manifest.update({
             "status": "completed",
             "audioUrl": f"/static/voice/mark/{mastered_path.name}",
             "rawUrl": f"/static/voice/mark/{raw_path.name}",
@@ -115,12 +155,14 @@ def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset: str)
             "metrics": metrics,
             "updatedAt": datetime.utcnow().isoformat(),
         })
+        _write_job_manifest(job_id, manifest)
     except Exception as exc:
-        _jobs[job_id].update({
+        manifest.update({
             "status": "failed",
             "error": str(exc),
             "updatedAt": datetime.utcnow().isoformat(),
         })
+        _write_job_manifest(job_id, manifest)
 
 
 @router.post("/synthesize")
@@ -131,27 +173,34 @@ async def synthesize(req: SynthesizeRequest, background_tasks: BackgroundTasks):
     preset = PRESETS.get(req.preset, PRESETS["mark_rocky_tutor_warm"])
     mix_preset = req.mixPreset or preset.get("mixPreset", "rocky_live")
 
-    _jobs[job_id] = {
+    manifest = {
         "jobId": job_id,
         "status": "queued",
+        "text": req.text,
+        "preset": req.preset,
+        "mixPreset": mix_preset,
         "createdAt": now,
         "updatedAt": now,
     }
+    _write_job_manifest(job_id, manifest)
 
-    background_tasks.add_task(
-        _run_synthesis_job,
-        job_id,
-        req.text,
-        req.preset,
-        mix_preset,
-    )
+    async with GPU_SEMAPHORE:
+        background_tasks.add_task(
+            _run_synthesis_job,
+            job_id,
+            req.text,
+            req.preset,
+            mix_preset,
+        )
 
     return {"jobId": job_id, "status": "queued", "pollUrl": f"/voice/synthesize/status/{job_id}"}
 
 
 @router.get("/synthesize/status/{job_id}", response_model=JobStatusResponse)
 async def synthesize_status(job_id: str):
-    job = _jobs.get(job_id)
+    if not JOB_ID_RE.match(job_id):
+        raise HTTPException(status_code=400, detail="Invalid jobId format")
+    job = _read_job_manifest(job_id)
     if not job:
         return JobStatusResponse(
             jobId=job_id,
@@ -160,3 +209,18 @@ async def synthesize_status(job_id: str):
             updatedAt=datetime.utcnow().isoformat(),
         )
     return JobStatusResponse(**job)
+
+
+@router.delete("/synthesize/cancel/{job_id}")
+async def cancel_job(job_id: str):
+    if not JOB_ID_RE.match(job_id):
+        raise HTTPException(status_code=400, detail="Invalid jobId format")
+    job = _read_job_manifest(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] in ("completed", "failed"):
+        return {"jobId": job_id, "status": job["status"], "cancelled": False, "reason": "already_terminal"}
+    job["status"] = "cancelled"
+    job["updatedAt"] = datetime.utcnow().isoformat()
+    _write_job_manifest(job_id, job)
+    return {"jobId": job_id, "status": "cancelled", "cancelled": True}

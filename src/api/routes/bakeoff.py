@@ -1,5 +1,6 @@
 """Model bakeoff endpoint — run same text through all installed engines."""
 
+import json
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -7,12 +8,13 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
-from .synthesize import _run_synthesis_job, _jobs
+from .synthesize import _run_synthesis_job, _read_job_manifest, _write_job_manifest, JOB_ID_RE, GPU_SEMAPHORE
 
 router = APIRouter()
 
-# Bakeoff aggregations
-_bakeoffs: dict[str, dict] = {}
+# Bakeoff aggregations persisted to filesystem
+BAKEOFF_DIR = Path("artifacts/bakeoffs")
+BAKEOFF_DIR.mkdir(parents=True, exist_ok=True)
 
 # Engines participating in bakeoff
 BAKEOFF_ENGINE_PRESETS = {
@@ -36,6 +38,10 @@ class BakeoffResponse(BaseModel):
     updatedAt: str
 
 
+def _bakeoff_path(bakeoff_id: str) -> Path:
+    return BAKEOFF_DIR / f"{bakeoff_id}.json"
+
+
 @router.post("/bakeoff")
 async def bakeoff(req: BakeoffRequest, background_tasks: BackgroundTasks):
     bid = req.bakeoffId or f"bake_{uuid.uuid4().hex[:8]}"
@@ -44,50 +50,58 @@ async def bakeoff(req: BakeoffRequest, background_tasks: BackgroundTasks):
     jobs_meta = []
     for engine, preset in BAKEOFF_ENGINE_PRESETS.items():
         job_id = f"{bid}_{engine}"
-        _jobs[job_id] = {
+        manifest = {
             "jobId": job_id,
             "status": "queued",
             "createdAt": now,
             "updatedAt": now,
         }
-        background_tasks.add_task(
-            _run_synthesis_job,
-            job_id,
-            req.text,
-            preset,
-            req.mixPreset,
-        )
+        _write_job_manifest(job_id, manifest)
+        async with GPU_SEMAPHORE:
+            background_tasks.add_task(
+                _run_synthesis_job,
+                job_id,
+                req.text,
+                preset,
+                req.mixPreset,
+            )
         jobs_meta.append({"jobId": job_id, "engine": engine, "preset": preset, "status": "queued"})
 
-    _bakeoffs[bid] = {
+    bake = {
         "bakeoffId": bid,
         "status": "running",
         "jobs": jobs_meta,
         "createdAt": now,
         "updatedAt": now,
     }
+    _bakeoff_path(bid).write_text(json.dumps(bake, indent=2, default=str))
 
     return {"bakeoffId": bid, "status": "running", "jobs": jobs_meta}
 
 
 @router.get("/bakeoff/status/{bakeoff_id}")
 async def bakeoff_status(bakeoff_id: str):
-    bake = _bakeoffs.get(bakeoff_id)
-    if not bake:
+    if not JOB_ID_RE.match(bakeoff_id):
+        return {"bakeoffId": bakeoff_id, "status": "invalid_id", "jobs": []}
+
+    path = _bakeoff_path(bakeoff_id)
+    if not path.exists():
         return {"bakeoffId": bakeoff_id, "status": "not_found", "jobs": []}
 
-    # Aggregate latest job statuses
+    bake = json.loads(path.read_text())
+
+    # Aggregate latest job statuses from manifests
     all_completed = True
     any_failed = False
     updated_jobs = []
-    for j in bake["jobs"]:
-        job = _jobs.get(j["jobId"], {})
+    for j in bake.get("jobs", []):
+        job = _read_job_manifest(j["jobId"]) or {}
         j["status"] = job.get("status", "unknown")
         j["audioUrl"] = job.get("audioUrl")
         j["metrics"] = job.get("metrics")
         j["error"] = job.get("error")
         updated_jobs.append(j)
-        if j["status"] not in ("completed", "failed"):
+        if j["status"] not in ("completed", "failed", "cancelled"):
             all_completed = False
         if j["status"] == "failed":
             any_failed = True
@@ -97,5 +111,8 @@ async def bakeoff_status(bakeoff_id: str):
         bake["status"] = "completed"
     elif any_failed:
         bake["status"] = "partial_failure"
+
+    bake["updatedAt"] = datetime.utcnow().isoformat()
+    path.write_text(json.dumps(bake, indent=2, default=str))
 
     return bake
