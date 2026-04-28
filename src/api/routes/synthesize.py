@@ -156,7 +156,7 @@ async def _do_synthesis(
 ) -> dict:
     """Inner worker: acquires GPU semaphore, runs inference + mastering.
     Returns timing dict for the caller to use on failure."""
-    timing: dict = {"submittedMs": round(t0 * 1000)}
+    timing: dict = {"submittedAtEpochMs": round(t0 * 1000)}
     async with GPU_SEMAPHORE:
         # Check if cancelled while waiting for semaphore
         if _read_job_manifest(job_id).get("status") == "cancelled":
@@ -166,7 +166,7 @@ async def _do_synthesis(
             return timing
 
         t_running = time.time()
-        timing["startedMs"] = round(t_running * 1000)
+        timing["startedAtEpochMs"] = round(t_running * 1000)
         proc_ref: dict = {"proc": None}
         RUNNING_PROCS[job_id] = proc_ref
         t_synth_start = None
@@ -225,10 +225,14 @@ async def _do_synthesis(
             if _read_job_manifest(job_id).get("status") == "cancelled":
                 return timing
 
+            t_raw_done = t_master_start
             t_done = time.time()
             timing.update({
-                "synthesisMs": round((t_master_start - t_synth_start) * 1000),
-                "masteringMs": round((t_done - t_master_start) * 1000),
+                "rawCompletedAtEpochMs": round(t_raw_done * 1000),
+                "masteredAtEpochMs": round(t_done * 1000),
+                "queueWaitMs": round((t_running - t0) * 1000),
+                "providerMs": round((t_raw_done - t_synth_start) * 1000),
+                "masteringMs": round((t_done - t_raw_done) * 1000),
                 "totalMs": round((t_done - t0) * 1000),
             })
             patch = {
@@ -242,6 +246,7 @@ async def _do_synthesis(
             _transition_status(job_id, "completed", patch)
         except Exception as exc:
             t_done = time.time()
+            timing["failedAtEpochMs"] = round(t_done * 1000)
             timing["totalMs"] = round((t_done - t0) * 1000)
             _mark_failed(job_id, str(exc), timing)
         finally:
@@ -260,7 +265,8 @@ async def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset
     except asyncio.TimeoutError:
         t_done = time.time()
         _mark_failed(job_id, f"Job exceeded {JOB_TIMEOUT_SECONDS}s timeout", {
-            "submittedMs": round(t0 * 1000),
+            "submittedAtEpochMs": round(t0 * 1000),
+            "failedAtEpochMs": round(t_done * 1000),
             "totalMs": round((t_done - t0) * 1000),
         })
         proc_ref = RUNNING_PROCS.pop(job_id, None)

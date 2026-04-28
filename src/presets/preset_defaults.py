@@ -3,7 +3,7 @@
 PRESETS = {
     "mark_rocky_tutor_warm": {
         "provider": "f5tts",
-        "reference": "voices/mark/processed/references/mark_narration_30s_24k_mono.wav",
+        "reference": "voices/mark/processed/references/novaxe_narration_20s_48k_24b_mono.wav",
         "mixPreset": "rocky_live",
         "speed": 1.0,
         "temperature": 0.75,
@@ -12,7 +12,7 @@ PRESETS = {
     },
     "mark_skybeam_creator_forward": {
         "provider": "f5tts",
-        "reference": "voices/mark/processed/references/mark_narration_30s_24k_mono.wav",
+        "reference": "voices/mark/processed/references/novaxe_narration_20s_48k_24b_mono.wav",
         "mixPreset": "skybeam_youtube",
         "speed": 1.04,
         "temperature": 0.82,
@@ -21,7 +21,7 @@ PRESETS = {
     },
     "mark_film_dialogue_deep": {
         "provider": "f5tts",
-        "reference": "voices/mark/processed/references/mark_narration_30s_24k_mono.wav",
+        "reference": "voices/mark/processed/references/novaxe_narration_20s_48k_24b_mono.wav",
         "mixPreset": "film_dialogue",
         "speed": 0.96,
         "temperature": 0.68,
@@ -30,14 +30,14 @@ PRESETS = {
     },
     "mark_chatterbox_storytelling": {
         "provider": "chatterbox",
-        "reference": "voices/mark/processed/references/mark_narration_30s_24k_mono.wav",
+        "reference": "voices/mark/processed/references/novaxe_narration_20s_48k_24b_mono.wav",
         "mixPreset": "skybeam_youtube",
         "emotion": "storytelling",
         "description": "Chatterbox storytelling preset for long-form narration.",
     },
     "mark_voxcpm2_clone": {
         "provider": "voxcpm2",
-        "reference": "voices/mark/processed/references/mark_narration_30s_24k_mono.wav",
+        "reference": "voices/mark/processed/references/novaxe_narration_full_48k_24b_mono.wav",
         "mixPreset": "film_dialogue",
         "description": "VoxCPM2 voice clone with reference audio.",
     },
