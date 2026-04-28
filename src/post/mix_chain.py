@@ -61,6 +61,27 @@ def measure_loudness(audio_path: str) -> dict:
     }
 
 
+def get_duration(audio_path: str) -> float:
+    """Return audio duration in seconds using ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            audio_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return 0.0
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
 def master_take(input_path: str, output_path: str, preset: str = "skybeam_youtube") -> dict:
     """Apply the 14-step voice post chain."""
     settings = LOUDNESS_PRESETS.get(preset, LOUDNESS_PRESETS["skybeam_youtube"])

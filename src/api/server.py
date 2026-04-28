@@ -1,5 +1,6 @@
 """FastAPI application for Mindsong Voice Foundry."""
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -9,17 +10,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
+logger = logging.getLogger("voice_foundry")
+
 # ── Auth: mandatory by default ──────────────────────────────────────────────
 VOICE_FOUNDRY_TOKEN = os.environ.get("VOICE_FOUNDRY_TOKEN")
 ALLOW_NO_TOKEN = os.environ.get("VOICE_FOUNDRY_DEV_ALLOW_NO_TOKEN") == "1"
+ENV = os.environ.get("VOICE_FOUNDRY_ENV", "dev")
 
-if not VOICE_FOUNDRY_TOKEN and not ALLOW_NO_TOKEN:
-    print(
-        "\n[FATAL] VOICE_FOUNDRY_TOKEN is required.\n"
-        "Set VOICE_FOUNDRY_DEV_ALLOW_NO_TOKEN=1 only for local throwaway dev.\n",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+if not VOICE_FOUNDRY_TOKEN:
+    if ALLOW_NO_TOKEN and ENV == "dev":
+        logger.warning(
+            "VOICE FOUNDRY RUNNING WITHOUT TOKEN — DEV MODE ONLY"
+        )
+    else:
+        print(
+            "\n[FATAL] VOICE_FOUNDRY_TOKEN is required.\n"
+            "Set VOICE_FOUNDRY_ENV=dev and VOICE_FOUNDRY_DEV_ALLOW_NO_TOKEN=1 "
+            "only for local throwaway dev.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 # Default dev origins; override with VOICE_FOUNDRY_ORIGINS=comma,separated,list
 DEFAULT_ORIGINS = [

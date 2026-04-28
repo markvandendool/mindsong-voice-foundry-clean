@@ -1,14 +1,16 @@
 """Model bakeoff endpoint — run same text through all installed engines."""
 
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+from pydantic import BaseModel, validator
 
-from .synthesize import _run_synthesis_job, _read_job_manifest, _write_job_manifest, JOB_ID_RE
+from src.api.utils import validate_safe_id
+from .synthesize import _run_synthesis_job, _read_job_manifest, _write_job_manifest
 
 router = APIRouter()
 
@@ -29,6 +31,16 @@ class BakeoffRequest(BaseModel):
     mixPreset: str = "rocky_live"
     bakeoffId: str | None = None
 
+    @validator("bakeoffId")
+    def validate_bakeoff_id(cls, v):
+        if v is None:
+            return v
+        if not re.match(r"^[A-Za-z0-9._-]{1,80}$", v):
+            raise ValueError("bakeoffId must be 1-80 chars of a-z, A-Z, 0-9, ., _, -")
+        if ".." in v:
+            raise ValueError("bakeoffId cannot contain '..'")
+        return v
+
 
 class BakeoffResponse(BaseModel):
     bakeoffId: str
@@ -44,7 +56,9 @@ def _bakeoff_path(bakeoff_id: str) -> Path:
 
 @router.post("/bakeoff")
 async def bakeoff(req: BakeoffRequest, background_tasks: BackgroundTasks):
-    bid = req.bakeoffId or f"bake_{uuid.uuid4().hex[:8]}"
+    # Server-generated ID; user-supplied ID stored as metadata only
+    bid = f"bakeoff_{uuid.uuid4().hex[:16]}"
+    user_bid = req.bakeoffId
     now = datetime.utcnow().isoformat()
 
     jobs_meta = []
@@ -69,6 +83,7 @@ async def bakeoff(req: BakeoffRequest, background_tasks: BackgroundTasks):
 
     bake = {
         "bakeoffId": bid,
+        "userBakeoffId": user_bid,
         "status": "running",
         "jobs": jobs_meta,
         "createdAt": now,
@@ -81,8 +96,7 @@ async def bakeoff(req: BakeoffRequest, background_tasks: BackgroundTasks):
 
 @router.get("/bakeoff/status/{bakeoff_id}")
 async def bakeoff_status(bakeoff_id: str):
-    if not JOB_ID_RE.match(bakeoff_id):
-        return {"bakeoffId": bakeoff_id, "status": "invalid_id", "jobs": []}
+    validate_safe_id(bakeoff_id, "bakeoff_id")
 
     path = _bakeoff_path(bakeoff_id)
     if not path.exists():

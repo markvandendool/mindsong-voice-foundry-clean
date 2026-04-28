@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import uuid
 from datetime import datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field, validator
 
+from src.api.utils import validate_safe_id
 from src.post.mix_chain import master_take
 from src.presets.preset_defaults import PRESETS
 
@@ -42,14 +44,25 @@ def _job_dir(job_id: str) -> Path:
     return ARTIFACTS_DIR / "jobs" / job_id
 
 
+def write_json_atomic(path: Path, data: dict) -> None:
+    """Atomic JSON write: temp file → fsync → rename → dir fsync."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    payload = json.dumps(data, indent=2, default=str, sort_keys=True)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(payload)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    dir_fd = os.open(path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
 def _write_job_manifest(job_id: str, data: dict) -> None:
-    """Atomic JSON write: temp file → fsync → rename."""
-    job_dir = _job_dir(job_id)
-    job_dir.mkdir(parents=True, exist_ok=True)
-    path = job_dir / "manifest.json"
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-    tmp.replace(path)
+    write_json_atomic(_job_dir(job_id) / "manifest.json", data)
 
 
 def _read_job_manifest(job_id: str) -> dict | None:
@@ -73,7 +86,7 @@ def _get_engine(provider: str):
     return _engines.get(provider)
 
 
-def _transition_status(job_id: str, new_status: str) -> bool:
+def _transition_status(job_id: str, new_status: str, patch: dict | None = None) -> bool:
     """Guarded status transition. Returns True if transition was allowed."""
     manifest = _read_job_manifest(job_id)
     if not manifest:
@@ -83,8 +96,22 @@ def _transition_status(job_id: str, new_status: str) -> bool:
         return False
     manifest["status"] = new_status
     manifest["updatedAt"] = datetime.utcnow().isoformat()
+    if patch:
+        manifest.update(patch)
     _write_job_manifest(job_id, manifest)
     return True
+
+
+def _mark_failed(job_id: str, reason: str) -> None:
+    manifest = _read_job_manifest(job_id) or {}
+    if manifest.get("status") == "cancelled":
+        return
+    manifest.update({
+        "status": "failed",
+        "error": reason,
+        "updatedAt": datetime.utcnow().isoformat(),
+    })
+    _write_job_manifest(job_id, manifest)
 
 
 class SynthesizeRequest(BaseModel):
@@ -118,9 +145,8 @@ class JobStatusResponse(BaseModel):
     updatedAt: str
 
 
-async def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset: str):
-    """Async worker: acquires GPU semaphore, runs inference + mastering, respects cancellation."""
-    # Acquire GPU semaphore HERE — this is the actual worker, not the task creation
+async def _do_synthesis(job_id: str, text: str, preset_key: str, mix_preset: str):
+    """Inner worker: acquires GPU semaphore, runs inference + mastering."""
     async with GPU_SEMAPHORE:
         # Check if cancelled while waiting for semaphore
         if _read_job_manifest(job_id).get("status") == "cancelled":
@@ -164,6 +190,7 @@ async def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset
                     proc_ref=proc_ref,
                 )
             elif provider == "voxcpm2":
+                # VoxCPM2 runs in-thread; cannot hard-cancel subprocess
                 await engine.synthesize(
                     text=text,
                     ref_audio=preset.get("reference"),
@@ -182,29 +209,35 @@ async def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset
             if _read_job_manifest(job_id).get("status") == "cancelled":
                 return
 
-            manifest = _read_job_manifest(job_id) or {}
-            manifest.update({
-                "status": "completed",
+            patch = {
                 "audioUrl": f"/static/voice/mark/{mastered_path.name}",
                 "rawUrl": f"/static/voice/mark/{raw_path.name}",
                 "provider": provider,
                 "preset": preset_key,
                 "metrics": metrics,
-                "updatedAt": datetime.utcnow().isoformat(),
-            })
-            _write_job_manifest(job_id, manifest)
+            }
+            _transition_status(job_id, "completed", patch)
         except Exception as exc:
-            manifest = _read_job_manifest(job_id) or {}
-            # Do not overwrite cancelled status
-            if manifest.get("status") != "cancelled":
-                manifest.update({
-                    "status": "failed",
-                    "error": str(exc),
-                    "updatedAt": datetime.utcnow().isoformat(),
-                })
-                _write_job_manifest(job_id, manifest)
+            _mark_failed(job_id, str(exc))
         finally:
             RUNNING_PROCS.pop(job_id, None)
+
+
+async def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset: str):
+    """Async worker with timeout wrapper."""
+    try:
+        await asyncio.wait_for(
+            _do_synthesis(job_id, text, preset_key, mix_preset),
+            timeout=JOB_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        _mark_failed(job_id, f"Job exceeded {JOB_TIMEOUT_SECONDS}s timeout")
+        proc_ref = RUNNING_PROCS.pop(job_id, None)
+        if proc_ref:
+            proc = proc_ref.get("proc")
+            if proc and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
 
 
 @router.post("/synthesize")
@@ -226,7 +259,7 @@ async def synthesize(req: SynthesizeRequest, background_tasks: BackgroundTasks):
     }
     _write_job_manifest(job_id, manifest)
 
-    # GPU semaphore is acquired INSIDE the background task, not here.
+    # GPU semaphore is acquired INSIDE the background task worker.
     background_tasks.add_task(
         _run_synthesis_job,
         job_id,
@@ -263,7 +296,7 @@ async def cancel_job(job_id: str):
     if job["status"] in ("completed", "failed"):
         return {"jobId": job_id, "status": job["status"], "cancelled": False, "reason": "already_terminal"}
 
-    # Try to terminate running subprocess
+    # Try to terminate running subprocess (F5/Chatterbox only)
     proc_ref = RUNNING_PROCS.get(job_id)
     if proc_ref:
         proc = proc_ref.get("proc")
@@ -275,7 +308,5 @@ async def cancel_job(job_id: str):
                 proc.kill()
                 await proc.wait()
 
-    job["status"] = "cancelled"
-    job["updatedAt"] = datetime.utcnow().isoformat()
-    _write_job_manifest(job_id, job)
+    _transition_status(job_id, "cancelled")
     return {"jobId": job_id, "status": "cancelled", "cancelled": True}
