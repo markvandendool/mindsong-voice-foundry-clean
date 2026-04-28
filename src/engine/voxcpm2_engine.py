@@ -10,10 +10,17 @@ from voxcpm import VoxCPM
 class VoxCPM2Engine:
     """Wraps VoxCPM2 for voice cloning and voice design.
 
-    Cancellation is cooperative: the model.generate() call itself cannot be
-    interrupted, but we check a cancellation event before writing output and
-    after generation completes. For true hard-kill, VoxCPM2 must run in a
-    separate process (planned for GA).
+    Cancellation is **cooperative (soft)**, not hard-kill:
+    - The model.generate() call itself cannot be interrupted from the thread.
+    - We check a cancellation event before writing output.
+    - If cancelled, the output file is NOT written and the job ends gracefully.
+    - The thread may continue GPU/CPU compute in the background until
+      model.generate() returns. This is a known limitation.
+    - For true hard-kill (process termination), VoxCPM2 must run in a
+      subprocess worker (planned for GA / RC-2.2).
+
+    See: Commander audit 2026-04-28 — VoxCPM2 cancellation classified as
+    "cooperative no-publish cancel, not hard kill."
     """
 
     def __init__(self, model_id: str = "openbmb/VoxCPM2"):

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -102,15 +103,18 @@ def _transition_status(job_id: str, new_status: str, patch: dict | None = None) 
     return True
 
 
-def _mark_failed(job_id: str, reason: str) -> None:
+def _mark_failed(job_id: str, reason: str, timing: dict | None = None) -> None:
     manifest = _read_job_manifest(job_id) or {}
     if manifest.get("status") == "cancelled":
         return
-    manifest.update({
+    update = {
         "status": "failed",
         "error": reason,
         "updatedAt": datetime.utcnow().isoformat(),
-    })
+    }
+    if timing:
+        update["timing"] = timing
+    manifest.update(update)
     _write_job_manifest(job_id, manifest)
 
 
@@ -140,23 +144,33 @@ class JobStatusResponse(BaseModel):
     provider: str | None = None
     preset: str | None = None
     metrics: dict | None = None
+    timing: dict | None = None
     error: str | None = None
     createdAt: str
     updatedAt: str
 
 
-async def _do_synthesis(job_id: str, text: str, preset_key: str, mix_preset: str):
-    """Inner worker: acquires GPU semaphore, runs inference + mastering."""
+async def _do_synthesis(
+    job_id: str, text: str, preset_key: str, mix_preset: str,
+    t0: float,
+) -> dict:
+    """Inner worker: acquires GPU semaphore, runs inference + mastering.
+    Returns timing dict for the caller to use on failure."""
+    timing: dict = {"submittedMs": round(t0 * 1000)}
     async with GPU_SEMAPHORE:
         # Check if cancelled while waiting for semaphore
         if _read_job_manifest(job_id).get("status") == "cancelled":
-            return
+            return timing
 
         if not _transition_status(job_id, "running"):
-            return
+            return timing
 
+        t_running = time.time()
+        timing["startedMs"] = round(t_running * 1000)
         proc_ref: dict = {"proc": None}
         RUNNING_PROCS[job_id] = proc_ref
+        t_synth_start = None
+        t_master_start = None
 
         try:
             preset = PRESETS.get(preset_key, PRESETS["mark_rocky_tutor_warm"])
@@ -172,6 +186,7 @@ async def _do_synthesis(job_id: str, text: str, preset_key: str, mix_preset: str
                 raise NotImplementedError(f"Provider {provider} not yet implemented in Foundry.")
 
             # ── Synthesis ──────────────────────────────────────────────────
+            t_synth_start = time.time()
             if provider == "f5tts":
                 await engine.synthesize(
                     text=text,
@@ -190,7 +205,7 @@ async def _do_synthesis(job_id: str, text: str, preset_key: str, mix_preset: str
                     proc_ref=proc_ref,
                 )
             elif provider == "voxcpm2":
-                # VoxCPM2 runs in-thread; cannot hard-cancel subprocess
+                # VoxCPM2 runs in-thread; cooperative (soft) cancel only
                 await engine.synthesize(
                     text=text,
                     ref_audio=preset.get("reference"),
@@ -200,38 +215,54 @@ async def _do_synthesis(job_id: str, text: str, preset_key: str, mix_preset: str
 
             # Check cancelled before mastering
             if _read_job_manifest(job_id).get("status") == "cancelled":
-                return
+                return timing
 
+            t_master_start = time.time()
             # ── Mastering ──────────────────────────────────────────────────
             metrics = master_take(str(raw_path), str(mastered_path), mix_preset)
 
             # Check cancelled before publishing
             if _read_job_manifest(job_id).get("status") == "cancelled":
-                return
+                return timing
 
+            t_done = time.time()
+            timing.update({
+                "synthesisMs": round((t_master_start - t_synth_start) * 1000),
+                "masteringMs": round((t_done - t_master_start) * 1000),
+                "totalMs": round((t_done - t0) * 1000),
+            })
             patch = {
                 "audioUrl": f"/static/voice/mark/{mastered_path.name}",
                 "rawUrl": f"/static/voice/mark/{raw_path.name}",
                 "provider": provider,
                 "preset": preset_key,
                 "metrics": metrics,
+                "timing": timing,
             }
             _transition_status(job_id, "completed", patch)
         except Exception as exc:
-            _mark_failed(job_id, str(exc))
+            t_done = time.time()
+            timing["totalMs"] = round((t_done - t0) * 1000)
+            _mark_failed(job_id, str(exc), timing)
         finally:
             RUNNING_PROCS.pop(job_id, None)
+    return timing
 
 
 async def _run_synthesis_job(job_id: str, text: str, preset_key: str, mix_preset: str):
     """Async worker with timeout wrapper."""
+    t0 = time.time()
     try:
         await asyncio.wait_for(
-            _do_synthesis(job_id, text, preset_key, mix_preset),
+            _do_synthesis(job_id, text, preset_key, mix_preset, t0),
             timeout=JOB_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
-        _mark_failed(job_id, f"Job exceeded {JOB_TIMEOUT_SECONDS}s timeout")
+        t_done = time.time()
+        _mark_failed(job_id, f"Job exceeded {JOB_TIMEOUT_SECONDS}s timeout", {
+            "submittedMs": round(t0 * 1000),
+            "totalMs": round((t_done - t0) * 1000),
+        })
         proc_ref = RUNNING_PROCS.pop(job_id, None)
         if proc_ref:
             proc = proc_ref.get("proc")

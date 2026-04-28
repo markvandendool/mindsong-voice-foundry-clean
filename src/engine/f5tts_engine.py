@@ -1,7 +1,22 @@
 """F5-TTS inference engine wrapper."""
 
 import asyncio
+import shutil
+import sys
 from pathlib import Path
+
+
+def _resolve_f5_cli() -> str:
+    """Find f5-tts_infer-cli in PATH or in the same bin dir as the Python executable."""
+    cli = shutil.which("f5-tts_infer-cli")
+    if cli:
+        return cli
+    # Fallback: look next to the current Python interpreter (venv case)
+    venv_bin = Path(sys.executable).parent
+    candidate = venv_bin / "f5-tts_infer-cli"
+    if candidate.exists():
+        return str(candidate)
+    raise RuntimeError("f5-tts_infer-cli not found in PATH or venv bin")
 
 
 class F5TTSEngine:
@@ -29,7 +44,7 @@ class F5TTSEngine:
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
         cmd = [
-            "f5-tts_infer-cli",
+            _resolve_f5_cli(),
             "--model", self.model,
             "--ref_audio", str(ref_path),
             "--ref_text", "",
